@@ -106,6 +106,27 @@ test/
 - checkpoint/log interval: 1,000
 - readout: winner, class_mean, class_sum, class_mean_nonzero, top-k variants
 
+## 속도 개선 기본값
+
+현재 버전은 L1/L2 spike 대기 루프가 너무 오래 반복되지 않도록 gain 시도 횟수와 최대 gain을 제한합니다.
+
+`sen` 모드는 정확도 손상을 줄이는 보수적 가속값을 사용합니다.
+
+- L1/L2 `min_spikes=2.0`
+- L2 `input_gain=1.5`
+- L1/L2 `interval_increment=0.75`
+- L1/L2 `max_gain_attempts=12`, `max_input_gain=10.0`
+- L2 STDP winner를 top-3로 제한
+
+`vth` 모드는 승자 뉴런을 더 빨리 고르도록 공격적 가속값을 사용합니다.
+
+- L1/L2 `min_spikes=1.0`
+- L2 `input_gain=2.5`
+- L2 `initial_theta=0.015`, `vth_theta_inc=0.000025`
+- L1/L2 `interval_increment=1.0`
+- L1/L2 `max_gain_attempts=8`, `max_input_gain=10.0`
+- L2 STDP winner를 top-1로 제한
+
 ## 빠른 smoke test
 
 ```bash
