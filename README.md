@@ -106,6 +106,17 @@ test/
 - checkpoint/log interval: 1,000
 - readout: winner, class_mean, class_sum, class_mean_nonzero, top-k variants
 
+## l2_vth 개선 버전
+
+`l2_vth` 브랜치에서는 Vth 방식만 빠르게 승자 뉴런을 고르도록 기본 파라미터를 조정했습니다.
+
+- Vth L1/L2 spike 대기 루프에 최대 gain 시도 횟수 적용
+- Vth L2 `min_spikes=1.0`, `input_gain=2.5`, `interval_increment=1.0`
+- Vth L2 `initial_theta=0.015`, `vth_theta_inc=0.000025`
+- Vth L2 STDP winner를 동률 전체가 아니라 top-1로 제한
+
+`sen` 모드 기본 파라미터는 그대로 유지됩니다.
+
 ## 빠른 smoke test
 
 ```bash

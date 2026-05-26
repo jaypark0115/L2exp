@@ -80,6 +80,9 @@ class SNNLayerConfig:
     initial_theta: float = 0.02
     weight_norm_target: float = 85.5
     input_gain: float = 1.0
+    max_gain_attempts: int = 100
+    max_input_gain: float = 100.0
+    winner_top_k: int = 0
     seed: int = 1234
     use_gpu: bool = True
     save_interval: int = 1000
@@ -331,7 +334,14 @@ class SNNRuntime:
         return self.xp.sum(spike, axis=1)
 
     def winner(self, count_xp) -> np.ndarray:
-        count_cpu = np.asarray(self.asnumpy(count_xp))
+        count_cpu = np.asarray(self.asnumpy(count_xp)).reshape(-1)
+        if count_cpu.size == 0:
+            return np.array([], dtype=np.uint16)
+        if self.cfg.winner_top_k > 0:
+            k = min(int(self.cfg.winner_top_k), count_cpu.size)
+            top_idx = np.argpartition(count_cpu, -k)[-k:]
+            order = np.argsort(count_cpu[top_idx])[::-1]
+            return top_idx[order].astype(np.uint16)
         return np.where(count_cpu == np.max(count_cpu))[0].astype(np.uint16)
 
     def normalization(self, weight_xp):
@@ -357,8 +367,10 @@ class FrozenL1Extractor(SNNRuntime):
         flat = image_cpu.reshape(self.cfg.n_input).astype(np.float32)
         count = self.xp.zeros(self.cfg.n_e, dtype=self.xp.float32)
         sensory_spike = None
+        best_spike = None
+        best_spike_total = -1.0
 
-        while float(self.xp.sum(count)) < self.cfg.min_spikes:
+        for _attempt in range(max(1, int(self.cfg.max_gain_attempts))):
             excitation, inhibition, sensory_gE, sensory_gI, inter_i_gE = self.initial_state()
             current_spike = self.poisson_spike_train(flat, interval)
             sensory_ge_spike = self.input_spike(weight_input, current_spike)
@@ -387,10 +399,15 @@ class FrozenL1Extractor(SNNRuntime):
                 adapt=False,
             )
             count = self.spike_count(sensory_spike)
-            if float(self.xp.sum(count)) < self.cfg.min_spikes:
-                interval += 1.0
+            spike_total = float(self.xp.sum(count))
+            if spike_total > best_spike_total:
+                best_spike = sensory_spike
+                best_spike_total = spike_total
+            if spike_total >= self.cfg.min_spikes:
+                return sensory_spike
+            interval = min(interval + self.cfg.interval_increment, self.cfg.max_input_gain)
 
-        return sensory_spike
+        return best_spike if best_spike is not None else sensory_spike
 
 
 class TrainableL2SNN(SNNRuntime):
@@ -534,7 +551,11 @@ class TrainableL2SNN(SNNRuntime):
         gain = self.cfg.input_gain
         count = self.xp.zeros(self.cfg.n_e, dtype=self.xp.float32)
         result = None
-        while float(self.xp.sum(count)) < self.cfg.min_spikes:
+        best_result = None
+        best_l2_ge_spike = None
+        best_count = None
+        best_spike_total = -1.0
+        for _attempt in range(max(1, int(self.cfg.max_gain_attempts))):
             excitation, inhibition, sensory_gE, sensory_gI, inter_i_gE = self.initial_state()
             l2_ge_spike = self.input_spike(weight_input, l1_spike_xp, gain=gain)
             result = self.e_spike_gen(
@@ -552,9 +573,16 @@ class TrainableL2SNN(SNNRuntime):
                 adapt=train,
             )
             count = self.spike_count(result[5])
-            if float(self.xp.sum(count)) < self.cfg.min_spikes:
-                gain += self.cfg.interval_increment
-        return result, l2_ge_spike, count
+            spike_total = float(self.xp.sum(count))
+            if spike_total > best_spike_total:
+                best_result = result
+                best_l2_ge_spike = l2_ge_spike
+                best_count = count
+                best_spike_total = spike_total
+            if spike_total >= self.cfg.min_spikes:
+                return result, l2_ge_spike, count
+            gain = min(gain + self.cfg.interval_increment, self.cfg.max_input_gain)
+        return best_result, best_l2_ge_spike, best_count
 
     def train(
         self,
@@ -819,17 +847,46 @@ def run_mode(
     train_images, train_labels = load_idx_dataset(mnist_dir, "training")
     test_images, test_labels = load_idx_dataset(mnist_dir, "testing")
 
-    l1_cfg = SNNLayerConfig(mode=mode, n_input=784, n_e=625, use_gpu=use_gpu, seed=seed)
-    l2_cfg = SNNLayerConfig(
+    l1_fast_params = {}
+    l2_fast_params = {}
+    if mode == "vth":
+        l1_fast_params = {
+            "min_spikes": 1.0,
+            "interval_increment": 1.0,
+            "max_gain_attempts": 8,
+            "max_input_gain": 10.0,
+        }
+        l2_fast_params = {
+            "min_spikes": 1.0,
+            "input_gain": 2.5,
+            "interval_increment": 1.0,
+            "initial_theta": 0.015,
+            "vth_theta_inc": 0.000025,
+            "max_gain_attempts": 8,
+            "max_input_gain": 10.0,
+            "winner_top_k": 1,
+        }
+
+    l1_cfg = SNNLayerConfig(
         mode=mode,
-        n_input=625,
-        n_e=n_l2,
+        n_input=784,
+        n_e=625,
         use_gpu=use_gpu,
         seed=seed,
-        save_interval=save_interval,
-        initial_interval=1.0,
-        interval_increment=0.5,
+        **l1_fast_params,
     )
+    l2_cfg_params = {
+        "mode": mode,
+        "n_input": 625,
+        "n_e": n_l2,
+        "use_gpu": use_gpu,
+        "seed": seed,
+        "save_interval": save_interval,
+        "initial_interval": 1.0,
+        "interval_increment": 0.5,
+    }
+    l2_cfg_params.update(l2_fast_params)
+    l2_cfg = SNNLayerConfig(**l2_cfg_params)
     l1 = FrozenL1Extractor(l1_cfg)
     l1_weights = l1.load_weights(l1_random_dir, l1_model_dir)
     l2 = TrainableL2SNN(l2_cfg)
